@@ -1,0 +1,13 @@
+config FUEL_GAUGE_BQ40Z50
+        tristate "TI BQ40z50 battery charger driver"
+        depends on I2C
+        default y
+        help
+          Say Y to enable support for TI bq40z50 fuel gauge driver
+
+config BQ40Z50_DEBUG
+	    bool "TI BQ40z50 driver debug features"
+        depends on FUEL_GAUGE_BQ40Z50
+        default n
+        help
+          Say Y to enable support for TI bq40z50 fuel gauge driver debug features
