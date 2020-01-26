@@ -42,6 +42,7 @@
 #define	FG_FLAGS_FC				BIT(5)
 #define	FG_FLAGS_DSG				BIT(6)
 #define FG_FLAGS_RCA				BIT(9)
+#define FG_BM_CAPM				BIT(15)
 
 // Once a minute
 #define DEFAULT_POLL_INTERVAL		60
@@ -70,6 +71,7 @@ enum bq_fg_reg_idx {
 	BQ_FG_REG_CCVM,		/* Constant Max Voltage */
 	BQ_FG_REG_CCCM,		/* Constant Max Current */
 	BQ_FG_REG_I,		/* Momentary current */
+	BQ_FG_REG_BM,		/* Battery Mode */
 	NUM_REGS,
 };
 
@@ -93,6 +95,7 @@ static u8 bq40z50_regs[NUM_REGS] = {
 	0x15,	/* Max Charge Voltage */
 	0x14,	/* Max Charge Current */
 	0x0A,	/* Momentary Current */
+	0x03,	/* Battery Mode */
 };
 
 
@@ -115,7 +118,8 @@ char * bq_fg_reg_cmd_names[] = {
 		"Design Voltage",
 		"Constant Max Voltage",
 		"Constant Max Current",
-		"Momentary Current"
+		"Momentary Current",
+		"Battery Mode"
 };
 
 enum bq_fg_mac_cmd {
@@ -173,7 +177,21 @@ struct bq_fg_chip {
 
 	bool batt_dsg;
 	bool batt_rca;	/* remaining capacity alarm */
-
+	union{
+		u16 bm_intval;
+		struct{
+			unsigned bm_icc		: 1;	/* Internal Charge Controller */
+			unsigned bm_pbs		: 1;	/* Primary Battery Support */
+			unsigned bm_rsvd1	: 5;	/* Reserved, do not use */
+			unsigned bm_cf		: 1;	/* Conditioning flag */
+			unsigned bm_cc		: 1;	/* Condition flag */
+			unsigned bm_pb		: 1;	/* Primary battery */
+			unsigned bm_rdvd2	: 3;	/* Reserved, do not use */
+			unsigned bm_am		: 1;	/* Alarm Mode */
+			unsigned bm_chgm	: 1;	/* Charger Mode */
+			unsigned bm_capm 	: 1;	/* Capacity reporting units */
+		};
+	};
 	int seal_state; /* 0 - Full Access, 1 - Unsealed, 2 - Sealed */
 	u16 batt_tte;
 	u16 batt_ttf;
@@ -457,6 +475,18 @@ static int fg_read_status(struct bq_fg_chip *bq)
 	return 0;
 }
 
+static int fg_read_bm(struct bq_fg_chip *bq){
+	int ret;
+	u16 flags;
+	ret = fg_read_word_cmd(bq, BQ_FG_REG_BM, &flags);
+	if (ret < 0)
+		return ret;
+	mutex_lock(&bq->data_lock);
+	bq->bm_intval = flags;
+	mutex_unlock(&bq->data_lock);
+	return 0;
+}
+
 static inline int fg_read_ccvm(struct bq_fg_chip *bq)
 {
 	return fg_read_word_cmd(bq, BQ_FG_REG_CCVM, &bq->batt_ccvm);
@@ -593,6 +623,7 @@ static enum power_supply_property fg_props[] = {
 	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
 	/*POWER_SUPPLY_PROP_HEALTH,*//*implement it in battery power_supply*/
 	POWER_SUPPLY_PROP_CHARGE_FULL,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
@@ -710,6 +741,11 @@ static int fg_get_property(struct power_supply *psy,
 
 	case POWER_SUPPLY_PROP_TYPE:
 		val->intval = POWER_SUPPLY_TYPE_BATTERY;
+		break;
+
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+		ret = fg_read_rm(bq);
+		val->intval = bq->batt_rm;
 		break;
 
 	default:
@@ -892,11 +928,23 @@ static irqreturn_t fg_btp_irq_thread(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static void fg_log_battery_mode(struct bq_fg_chip *bq){
+	bq_log("Battery Mode: ICC=%d PBS=%d CF=%d CC=%d PB=%d AM=%d CHGM=%d CAPM=%d\n",
+			bq->bm_icc,
+			bq->bm_pbs,
+			bq->bm_cf,
+			bq->bm_cc,
+			bq->bm_pb,
+			bq->bm_am,
+			bq->bm_chgm,
+			bq->bm_capm
+			);
+}
+
 static void fg_update_status(struct bq_fg_chip *bq)
 {
-	// Outside of mutex just not to create deadlock.
 	fg_get_batt_status(bq);
-
+	fg_read_bm(bq);
 	fg_read_rsoc(bq);
 	fg_read_volt(bq);
 	fg_read_current(bq);
@@ -922,6 +970,7 @@ static void fg_monitor_workfunc(struct work_struct *work)
 		fg_update_status(bq);
 #ifdef CONFIG_BQ40Z50_DEBUG
 		fg_dump_registers(bq);
+		fg_log_battery_mode(bq);
 #endif
 		schedule_delayed_work(&bq->monitor_work, poll_interval * HZ);
 	} else {
@@ -934,8 +983,7 @@ static void fg_monitor_workfunc(struct work_struct *work)
 static void determine_initial_status(struct bq_fg_chip *bq)
 {
 	fg_update_status(bq);
-
-	fg_btp_irq_thread(bq->client->irq, bq);
+	fg_log_battery_mode(bq);
 }
 
 static int bq_fg_probe(struct i2c_client *client,
