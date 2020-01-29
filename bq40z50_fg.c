@@ -44,6 +44,60 @@
 #define FG_FLAGS_RCA				BIT(9)
 #define FG_BM_CAPM				BIT(15)
 
+#define FG_MBA_SAFE_CUV		BIT(0)
+#define FG_MBA_SAFE_COV		BIT(1)
+#define FG_MBA_SAFE_OCC1	BIT(2)
+#define FG_MBA_SAFE_OCC2	BIT(3)
+#define FG_MBA_SAFE_OCD1	BIT(4)
+#define FG_MBA_SAFE_OCD2	BIT(5)
+#define FG_MBA_SAFE_AOLD	BIT(7)
+#define FG_MBA_SAFE_ASCCL	BIT(9)
+#define FG_MBA_SAFE_ASCDL	BIT(11)
+#define FG_MBA_SAFE_OTC		BIT(12)
+#define FG_MBA_SAFE_OTD		BIT(13)
+#define FG_MBA_SAFE_CUVC	BIT(14)
+#define FG_MBA_SAFE_OTF		BIT(16)
+#define FG_MBA_SAFE_PTO		BIT(18)
+#define FG_MBA_SAFE_PTOS	BIT(19)
+#define FG_MBA_SAFE_CTO		BIT(20)
+#define FG_MBA_SAFE_CTOS	BIT(21)
+#define FG_MBA_SAFE_OC		BIT(22)
+#define FG_MBA_SAFE_CHGC	BIT(23)
+#define FG_MBA_SAFE_CHGV	BIT(24)
+#define FG_MBA_SAFE_PCHGC	BIT(25)
+#define FG_MBA_SAFE_UTC		BIT(26)
+#define FG_MBA_SAFE_UTD		BIT(27)
+
+#define FG_MBA_OPS_DSG		BIT(1)
+#define FG_MBA_OPS_CHG		BIT(2)
+#define FG_MBA_OPS_PCHG		BIT(3)
+#define FG_MBA_OPS_FUSE		BIT(5)
+#define FG_MBA_OPS_BTP_INT	BIT(7)
+#define FG_MBA_OPS_SEC0		BIT(8)
+#define FG_MBA_OPS_SEC1		BIT(9)
+#define FG_MBA_OPS_SDV		BIT(10)
+#define FG_MBA_OPS_SS		BIT(11)
+#define FG_MBA_OPS_PF		BIT(12)
+#define FG_MBA_OPS_XDSG		BIT(13)
+#define FG_MBA_OPS_XDHG		BIT(14)
+#define FG_MBA_OPS_SLEEP	BIT(15)
+#define FG_MBA_OPS_SDM		BIT(16)
+#define FG_MBA_OPS_LED		BIT(17)
+#define FG_MBA_OPS_AUTH		BIT(18)
+#define FG_MBA_OPS_AUTOCALM	BIT(19)
+#define FG_MBA_OPS_CAL		BIT(20)
+#define FG_MBA_OPS_CAL_OFF	BIT(21)
+#define FG_MBA_OPS_XL		BIT(22)
+#define FG_MBA_OPS_SLEEPM	BIT(23)
+#define FG_MBA_OPS_INIT		BIT(24)
+#define FG_MBA_OPS_SMBLCAL	BIT(25)
+#define FG_MBA_OPS_SLPAD	BIT(26)
+#define FG_MBA_OPS_SLPCC	BIT(27)
+#define FG_MBA_OPS_CB		BIT(28)
+#define FG_MBA_OPS_EMSHUT	BIT(29)
+
+#define FLAG_TO_BOOL(flag, var)	(!!(flag & var))
+
 // Once a minute
 #define DEFAULT_POLL_INTERVAL		60
 static unsigned int poll_interval = DEFAULT_POLL_INTERVAL;
@@ -72,6 +126,7 @@ enum bq_fg_reg_idx {
 	BQ_FG_REG_CCCM,		/* Constant Max Current */
 	BQ_FG_REG_I,		/* Momentary current */
 	BQ_FG_REG_BM,		/* Battery Mode */
+	BQ_FG_REG_OP_STATUS,/* Operation Status */
 	NUM_REGS,
 };
 
@@ -96,6 +151,7 @@ static u8 bq40z50_regs[NUM_REGS] = {
 	0x14,	/* Max Charge Current */
 	0x0A,	/* Momentary Current */
 	0x03,	/* Battery Mode */
+	0x54,	/* Operation Status */
 };
 
 
@@ -119,11 +175,12 @@ char * bq_fg_reg_cmd_names[] = {
 		"Constant Max Voltage",
 		"Constant Max Current",
 		"Momentary Current",
-		"Battery Mode"
+		"Battery Mode",
+		"Operation Status"
 };
 
 enum bq_fg_mac_cmd {
-	FG_MAC_CMD_OP_STATUS	= 0x0000,
+	FG_MAC_CMD_OP_STATUS_L	= 0x0000,
 	FG_MAC_CMD_DEV_TYPE	= 0x0001,
 	FG_MAC_CMD_FW_VER	= 0x0002,
 	FG_MAC_CMD_HW_VER	= 0x0003,
@@ -132,8 +189,11 @@ enum bq_fg_mac_cmd {
 	FG_MAC_CMD_GAUGING	= 0x0021,
 	FG_MAC_CMD_SEAL		= 0x0030,
 	FG_MAC_CMD_DEV_RESET	= 0x0041,
+	FG_MAC_CMD_SAFE_ALERT	= 0x0050,
+	FG_MAC_CMD_SAFE_STATUS	= 0x0051,
+	FG_MAC_CMD_GSTATUS_3	= 0x0075,
+	FG_MAC_CMD_OP_STATUS	= 0x0054,
 };
-
 
 enum {
 	SEAL_STATE_RSVED,
@@ -141,7 +201,6 @@ enum {
 	SEAL_STATE_SEALED,
 	SEAL_STATE_FA,
 };
-
 
 enum bq_fg_device {
 	BQ40Z50,
@@ -414,11 +473,21 @@ static int fg_mac_write_block(struct bq_fg_chip *bq, u16 cmd, u8 *data, u8 len)
 }
 #endif
 
+static int fg_reset(struct bq_fg_chip *bq){
+	int ret;
+	ret = fg_write_word(bq, bq->regs[BQ_FG_REG_MBA], FG_MAC_CMD_DEV_RESET);
+
+	if (ret < 0) {
+		bq_err("Failed to send firmware reset subcommand:%d\n", ret);
+	}
+	return ret;
+}
+
 static void fg_read_fw_version(struct bq_fg_chip *bq)
 {
 
 	int ret;
-	u8 buf[36];
+	u8 buf[I2C_SMBUS_BLOCK_MAX + 4];
 
 	ret = fg_write_word(bq, bq->regs[BQ_FG_REG_MBA], FG_MAC_CMD_FW_VER);
 
@@ -466,10 +535,10 @@ static int fg_read_status(struct bq_fg_chip *bq)
 	if (ret < 0)
 		return ret;
 	mutex_lock(&bq->data_lock);
-	bq->batt_fc		= !!(flags & FG_FLAGS_FC);
-	bq->batt_fd		= !!(flags & FG_FLAGS_FD);
-	bq->batt_rca		= !!(flags & FG_FLAGS_RCA);
-	bq->batt_dsg		= !!(flags & FG_FLAGS_DSG);
+	bq->batt_fc		= FLAG_TO_BOOL(flags, FG_FLAGS_FC);
+	bq->batt_fd		= FLAG_TO_BOOL(flags, FG_FLAGS_FD);
+	bq->batt_rca	= FLAG_TO_BOOL(flags, FG_FLAGS_RCA);
+	bq->batt_dsg	= FLAG_TO_BOOL(flags, FG_FLAGS_DSG);
 	mutex_unlock(&bq->data_lock);
 
 	return 0;
@@ -745,7 +814,7 @@ static int fg_get_property(struct power_supply *psy,
 
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		ret = fg_read_rm(bq);
-		val->intval = bq->batt_rm;
+		val->intval = MILLI_TO_MICRO(bq->batt_rm);
 		break;
 
 	default:
@@ -870,19 +939,24 @@ static ssize_t fg_attr_show_Qmax(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bq_fg_chip *bq = i2c_get_clientdata(client);
 	int ret;
-	u8 t_buf[32];
-	u8 temp_buf[32];
+	union {
+		u16 _data[I2C_SMBUS_BLOCK_MAX];
+		struct {
+			u8 t_buf[I2C_SMBUS_BLOCK_MAX];
+			u8 temp_buf[I2C_SMBUS_BLOCK_MAX];
+		};
+	} block;
 	int i, idx, len;
 
-	memset(t_buf, 0, 64);
+	memset(block._data, 0, I2C_SMBUS_BLOCK_MAX);
 	/* GaugingStatus3 register contains Qmax value */
-	ret = fg_mac_read_block(bq, 0x0075, t_buf, 24);
+	ret = fg_mac_read_block(bq, FG_MAC_CMD_GSTATUS_3, block.t_buf, 24);
 	if (ret < 0)
 		return 0;
 	idx = 0;
 	for (i = 0; i < 4; i++) {
-		len = sprintf(temp_buf, "Qmax Cell %d = %d\n", i, (t_buf[i*2] << 8) | t_buf[i*2+1]);
-		memcpy(&buf[idx], temp_buf, len);
+		len = sprintf(block.temp_buf, "Qmax Cell %d = %d\n", i, (block.t_buf[i*2] << 8) | block.t_buf[i*2+1]);
+		memcpy(&buf[idx], block.temp_buf, len);
 		idx += len;
 	}
 
@@ -892,9 +966,149 @@ static ssize_t fg_attr_show_Qmax(struct device *dev,
 static DEVICE_ATTR(RaTable, S_IRUGO, fg_attr_show_Ra_table, NULL);
 static DEVICE_ATTR(Qmax, S_IRUGO, fg_attr_show_Qmax, NULL);
 
+static ssize_t fg_attr_reset(struct device *dev,
+				struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bq_fg_chip *bq = i2c_get_clientdata(client);
+	int ret;
+	ret = fg_reset(bq);
+	if(ret < 0)
+		return ret;
+	return count;
+}
+
+static DEVICE_ATTR(reset, S_IRUGO, NULL, fg_attr_reset);
+#define LITTLE_ENDIAN_DECODE_H4(buf)		(buf[3] | (buf[2] << 8) | (buf[1] << 16) | (buf[0] << 24))
+
+static ssize_t fg_attr_show_safe_flags_hex(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bq_fg_chip *bq = i2c_get_clientdata(client);
+	int ret, len = 0;
+	u32 flags;
+	u8 t_buf[34];
+
+	memset(t_buf, 0, 34);
+	ret = fg_mac_read_block(bq, FG_MAC_CMD_SAFE_STATUS, t_buf, 32);
+	if (ret < 0)
+		return 0;
+	flags = LITTLE_ENDIAN_DECODE_H4(t_buf);
+	len += scnprintf(buf, PAGE_SIZE, "0x%04x\n", flags);
+	return len;
+}
+
+static DEVICE_ATTR(safe_flags_hex, S_IRUGO, fg_attr_show_safe_flags_hex, NULL);
+
+
+// Page size is 4k on arm, so the buffer should suffice
+#define PRINT_FLAG(name, bit)	{ len += scnprintf(buf + len, PAGE_SIZE - len, "%s = %d\n", name, FLAG_TO_BOOL(flags, bit)); }
+
+static ssize_t fg_attr_show_safe_flags_readable(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bq_fg_chip *bq = i2c_get_clientdata(client);
+	int ret;
+	u32 flags;
+	u8 t_buf[I2C_SMBUS_BLOCK_MAX];
+	int len = 0;
+
+	memset(t_buf, 0, 34);
+	ret = fg_mac_read_block(bq, FG_MAC_CMD_SAFE_STATUS, t_buf, I2C_SMBUS_BLOCK_MAX);
+	if (ret < 0)
+		return 0;
+
+	flags = LITTLE_ENDIAN_DECODE_H4(t_buf);
+
+	PRINT_FLAG("CUV", FG_MBA_SAFE_CUV);
+	PRINT_FLAG("COV", FG_MBA_SAFE_COV);
+	PRINT_FLAG("OCC1", FG_MBA_SAFE_OCC1);
+	PRINT_FLAG("OCC2", FG_MBA_SAFE_OCC2);
+	PRINT_FLAG("OCD1", FG_MBA_SAFE_OCD1);
+	PRINT_FLAG("OCD2", FG_MBA_SAFE_OCD2);
+	PRINT_FLAG("AOLD", FG_MBA_SAFE_AOLD);
+	PRINT_FLAG("ASCCL", FG_MBA_SAFE_ASCCL);
+	PRINT_FLAG("ASCDL", FG_MBA_SAFE_ASCDL);
+	PRINT_FLAG("OTC", FG_MBA_SAFE_OTC);
+	PRINT_FLAG("OTD", FG_MBA_SAFE_OTD);
+	PRINT_FLAG("CUVC", FG_MBA_SAFE_CUVC);
+	PRINT_FLAG("OTF", FG_MBA_SAFE_OTF);
+	PRINT_FLAG("PTO", FG_MBA_SAFE_PTO);
+	PRINT_FLAG("PTOS", FG_MBA_SAFE_PTOS);
+	PRINT_FLAG("CTO", FG_MBA_SAFE_CTO);
+	PRINT_FLAG("CTOS", FG_MBA_SAFE_CTOS);
+	PRINT_FLAG("OC", FG_MBA_SAFE_OC);
+	PRINT_FLAG("CHGC", FG_MBA_SAFE_CHGC);
+	PRINT_FLAG("CHGV", FG_MBA_SAFE_CHGV);
+	PRINT_FLAG("PCHGC", FG_MBA_SAFE_PCHGC);
+	PRINT_FLAG("UTC", FG_MBA_SAFE_UTC);
+	PRINT_FLAG("UTD", FG_MBA_SAFE_UTD);
+	return len;
+}
+
+static DEVICE_ATTR(safe_flags, S_IRUGO, fg_attr_show_safe_flags_readable, NULL);
+
+
+static ssize_t fg_attr_show_op_status_flags(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bq_fg_chip *bq = i2c_get_clientdata(client);
+	int ret;
+	u32 flags;
+	u8 t_buf[I2C_SMBUS_BLOCK_MAX];
+	int len = 0;
+
+	memset(t_buf, 0, I2C_SMBUS_BLOCK_MAX);
+	ret = fg_mac_read_block(bq, FG_MAC_CMD_OP_STATUS, t_buf, I2C_SMBUS_BLOCK_MAX);
+	if (ret < 0)
+		return 0;
+
+	// The data returned in Little Endian bytes order
+	flags = LITTLE_ENDIAN_DECODE_H4(t_buf);
+	PRINT_FLAG("DSG", FG_MBA_OPS_DSG);
+	PRINT_FLAG("CHG", FG_MBA_OPS_CHG);
+	PRINT_FLAG("PCHG", FG_MBA_OPS_PCHG);
+	PRINT_FLAG("FUSE", FG_MBA_OPS_FUSE);
+	PRINT_FLAG("BTP_INT", FG_MBA_OPS_BTP_INT);
+	PRINT_FLAG("SEC0", FG_MBA_OPS_SEC0);
+	PRINT_FLAG("SEC1", FG_MBA_OPS_SEC1);
+	PRINT_FLAG("SDV", FG_MBA_OPS_SDV);
+	PRINT_FLAG("SS", FG_MBA_OPS_SS);
+	PRINT_FLAG("PF", FG_MBA_OPS_PF);
+	PRINT_FLAG("XDSG", FG_MBA_OPS_XDSG);
+	PRINT_FLAG("XDHG", FG_MBA_OPS_XDHG);
+	PRINT_FLAG("SLEEP", FG_MBA_OPS_SLEEP);
+	PRINT_FLAG("SDM", FG_MBA_OPS_SDM);
+	PRINT_FLAG("LED", FG_MBA_OPS_LED);
+	PRINT_FLAG("AUTH", FG_MBA_OPS_AUTH);
+	PRINT_FLAG("AUTOCALM", FG_MBA_OPS_AUTOCALM);
+	PRINT_FLAG("CAL", FG_MBA_OPS_CAL);
+	PRINT_FLAG("CAL_OFF", FG_MBA_OPS_CAL_OFF);
+	PRINT_FLAG("XL", FG_MBA_OPS_XL);
+	PRINT_FLAG("SLEEPM", FG_MBA_OPS_SLEEPM);
+	PRINT_FLAG("INIT", FG_MBA_OPS_INIT);
+	PRINT_FLAG("SMBLCAL", FG_MBA_OPS_SMBLCAL);
+	PRINT_FLAG("SLPAD", FG_MBA_OPS_SLPAD);
+	PRINT_FLAG("SLPCC", FG_MBA_OPS_SLPCC);
+	PRINT_FLAG("CB", FG_MBA_OPS_CB);
+	PRINT_FLAG("EMSHUT", FG_MBA_OPS_EMSHUT);
+	return len;
+}
+
+static DEVICE_ATTR(op_status, S_IRUGO, fg_attr_show_op_status_flags, NULL);
+
+#undef PRINT_FLAG
+
 static struct attribute *fg_attributes[] = {
 	&dev_attr_RaTable.attr,
 	&dev_attr_Qmax.attr,
+	&dev_attr_reset.attr,
+	&dev_attr_safe_flags_hex.attr,
+	&dev_attr_safe_flags.attr,
+	&dev_attr_op_status.attr,
 	NULL,
 };
 
